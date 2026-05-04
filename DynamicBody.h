@@ -34,8 +34,8 @@ public:
 
     DVec3 worldPos;
 
-    int    previewSteps = 500;
-    double previewDt    = 60.0;
+    int    previewSteps = 540;
+    double previewDt    = 10.0;
 
     static constexpr double G      = 6.674e-11;
     static constexpr double TWO_PI = 2.0 * M_PI;
@@ -80,8 +80,6 @@ public:
             propagateKepler(t);
         }
 
-        // worldPos uses the CURRENT frame's parent position — consistent
-        // with what draw() will also see this frame.
         worldPos = {
             parent->position.x + rx,
             parent->position.y + ry,
@@ -94,13 +92,9 @@ public:
     void draw(const DVec3& camPos) const {
         if (!valid) return;
 
-        // Snapshot parent position ONCE for this entire draw call.
-        // Every piece of geometry — ship body, vectors, orbit, arc — uses
-        // this same origin so nothing is offset relative to anything else.
+        // Snapshot parent position once — all geometry this frame uses this origin
         const DVec3 orig = parent->position;
 
-        // Ship body — derived from orig+state, NOT from worldPos,
-        // so it's consistent with the arc start point below.
         DVec3 shipWorld = { orig.x + rx, orig.y + ry, orig.z + rz };
         Vector3 pos = shipWorld.toVec3(camPos);
 
@@ -184,7 +178,6 @@ public:
 
 private:
 
-    // Builds the 3x2 perifocal→inertial rotation matrix
     static void buildRotMatrix(double lan, double inc, double aop,
                                double& Rxx, double& Rxy,
                                double& Ryx, double& Ryy,
@@ -199,6 +192,50 @@ private:
         Ryy = -sinO*sinw + cosO*cosw*cosi;
         Rzx =  sinw*sini;
         Rzy =  cosw*sini;
+    }
+
+    // Fit elements from an arbitrary state — does not touch member state
+    // Returns false if orbit is hyperbolic or degenerate
+    bool fitElementsFromState(
+        double prx, double pry, double prz,
+        double pvx, double pvy, double pvz,
+        double& sma, double& ecc,
+        double& inc, double& lan, double& aop) const
+    {
+        double mu = G * parent->mass;
+        double r  = std::sqrt(prx*prx + pry*pry + prz*prz);
+        double v2 = pvx*pvx + pvy*pvy + pvz*pvz;
+
+        double hx = pry*pvz - prz*pvy;
+        double hy = prz*pvx - prx*pvz;
+        double hz = prx*pvy - pry*pvx;
+        double h  = std::sqrt(hx*hx + hy*hy + hz*hz);
+
+        double nx = -hy, ny = hx;
+        double nMag = std::sqrt(nx*nx + ny*ny);
+
+        double evx = (pvy*hz - pvz*hy)/mu - prx/r;
+        double evy = (pvz*hx - pvx*hz)/mu - pry/r;
+        double evz = (pvx*hy - pvy*hx)/mu - prz/r;
+        ecc = std::sqrt(evx*evx + evy*evy + evz*evz);
+        sma = 1.0 / (2.0/r - v2/mu);
+
+        if (ecc >= 1.0 || sma <= 0.0) return false;
+
+        inc = std::acos(std::clamp(hz / h, -1.0, 1.0));
+
+        lan = 0.0;
+        if (nMag > 1e-10) {
+            lan = std::acos(std::clamp(nx / nMag, -1.0, 1.0));
+            if (ny < 0.0) lan = TWO_PI - lan;
+        }
+        aop = 0.0;
+        if (nMag > 1e-10 && ecc > 1e-10) {
+            double ndote = (nx*evx + ny*evy) / (nMag * ecc);
+            aop = std::acos(std::clamp(ndote, -1.0, 1.0));
+            if (evz < 0.0) aop = TWO_PI - aop;
+        }
+        return true;
     }
 
     void propagateKepler(double t)
@@ -228,7 +265,7 @@ private:
         buildRotMatrix(elements.lan, elements.inc, elements.aop,
                        Rxx,Rxy,Ryx,Ryy,Rzx,Rzy);
 
-        rx = Rxx*xOrb + Rxy*yOrb;  ry = Ryx*xOrb + Ryy*yOrb;  rz = Rzx*xOrb + Rzy*yOrb;
+        rx = Rxx*xOrb + Rxy*yOrb;   ry = Ryx*xOrb + Ryy*yOrb;   rz = Rzx*xOrb + Rzy*yOrb;
         vx = Rxx*vxOrb + Rxy*vyOrb; vy = Ryx*vxOrb + Ryy*vyOrb; vz = Rzx*vxOrb + Rzy*vyOrb;
     }
 
@@ -281,7 +318,6 @@ private:
         pvz += (dt/6.0)*(az1+2*az2+2*az3+az4);
     }
 
-    // Draws a full Keplerian ellipse given elements, using the provided origin
     void drawEllipse(const DVec3& orig, const DVec3& camPos,
                      double sma, double ecc,
                      double lan, double inc, double aop,
@@ -311,18 +347,17 @@ private:
             prev = pt;
         }
 
-        // Pe marker (nu=0 → xOrb=rPe, yOrb=0)
+        // Pe marker
         double rPe = sma * (1.0 - ecc);
         DVec3 peri = { orig.x + Rxx*rPe, orig.y + Ryx*rPe, orig.z + Rzx*rPe };
         DrawSphere(peri.toVec3(camPos), (float)(parent->radius * 0.003), YELLOW);
 
-        // Ap marker (nu=π → xOrb=-rAp, yOrb=0)
+        // Ap marker
         double rAp = sma * (1.0 + ecc);
         DVec3 apo  = { orig.x - Rxx*rAp, orig.y - Ryx*rAp, orig.z - Rzx*rAp };
         DrawSphere(apo.toVec3(camPos), (float)(parent->radius * 0.003), SKYBLUE);
     }
 
-    // Coasting orbit — uses snapshotted orig passed from draw()
     void drawOrbit(const DVec3& camPos, const DVec3& orig) const {
         if (!elements.valid || elements.ecc >= 1.0) return;
         drawEllipse(orig, camPos,
@@ -331,75 +366,52 @@ private:
                     { 0, 200, 100, 180 });
     }
 
-    // Thrust trajectory preview — uses the same snapshotted orig from draw()
     void drawThrustTrajectory(const DVec3& camPos, const DVec3& orig) const {
         if (!valid || !parent) return;
 
-        // ---- Phase 1: burn arc ----
-        // Start from current local state — ship position is orig+rx/ry/rz
+        // ---------------------------------------------------------------
+        // The orbit prediction shows "what if I cut engines RIGHT NOW".
+        // Fit osculating elements from the current Cartesian state and
+        // draw that ellipse immediately — no forward integration needed.
+        // This updates every frame as the burn changes the state, giving
+        // a smooth live readout of the resulting orbit.
+        // ---------------------------------------------------------------
+        double sma, ecc, inc, lan, aop;
+        if (fitElementsFromState(rx, ry, rz, vx, vy, vz,
+                                 sma, ecc, inc, lan, aop))
+        {
+            drawEllipse(orig, camPos, sma, ecc, lan, inc, aop,
+                        { 0, 220, 120, 200 });
+        }
+
+        // ---------------------------------------------------------------
+        // Short burn arc — forward-integrate a small number of steps with
+        // thrust ON to show the immediate trajectory direction only.
+        // This is visual feedback for steering, not orbit prediction.
+        // Keep it short (a few orbital minutes) so it stays near the ship.
+        // ---------------------------------------------------------------
+        const int   arcSteps = 60;   // 60 steps × 10 s = 10 minutes
+        const double arcDt   = 10.0;
+
         double prx = rx, pry = ry, prz = rz;
         double pvx = vx, pvy = vy, pvz = vz;
-
-        // First point: ship's current position, derived from same orig
         Vector3 prev = DVec3{ orig.x+rx, orig.y+ry, orig.z+rz }.toVec3(camPos);
-        bool hitGround = false;
 
-        for (int i = 0; i < previewSteps; i++) {
-            integrateRK4(previewDt, prx, pry, prz, pvx, pvy, pvz, true);
+        for (int i = 0; i < arcSteps; i++) {
+            integrateRK4(arcDt, prx, pry, prz, pvx, pvy, pvz, true);
 
-            if (std::sqrt(prx*prx + pry*pry + prz*prz) < parent->radius) {
-                hitGround = true;
-                break;
-            }
+            if (std::sqrt(prx*prx + pry*pry + prz*prz) < parent->radius) break;
 
-            float  t   = (float)i / (float)(previewSteps - 1);
+            float  t   = (float)i / (float)(arcSteps - 1);
             Color  col = {
                 255,
                 (unsigned char)(165 + (int)(90.0f * t)),
                 0,
-                (unsigned char)(220 - (int)(80.0f * t))
+                200
             };
-
-            // Arc point: orig + local position — same orig as ship body
             Vector3 pt = DVec3{ orig.x+prx, orig.y+pry, orig.z+prz }.toVec3(camPos);
             DrawLine3D(prev, pt, col);
             prev = pt;
         }
-
-        if (hitGround) return;
-
-        // ---- Fit elements from burn-end state ----
-        double mu = G * parent->mass;
-        double r  = std::sqrt(prx*prx + pry*pry + prz*prz);
-        double v2 = pvx*pvx + pvy*pvy + pvz*pvz;
-
-        double hx = pry*pvz - prz*pvy, hy = prz*pvx - prx*pvz, hz = prx*pvy - pry*pvx;
-        double h  = std::sqrt(hx*hx + hy*hy + hz*hz);
-        double nx = -hy, ny = hx;
-        double nMag = std::sqrt(nx*nx + ny*ny);
-
-        double evx = (pvy*hz - pvz*hy)/mu - prx/r;
-        double evy = (pvz*hx - pvx*hz)/mu - pry/r;
-        double evz = (pvx*hy - pvy*hx)/mu - prz/r;
-        double ecc = std::sqrt(evx*evx + evy*evy + evz*evz);
-        double sma = 1.0 / (2.0/r - v2/mu);
-
-        if (ecc >= 1.0 || sma <= 0.0) return;
-
-        double inc = std::acos(std::clamp(hz / h, -1.0, 1.0));
-        double lan = 0.0;
-        if (nMag > 1e-10) {
-            lan = std::acos(std::clamp(nx / nMag, -1.0, 1.0));
-            if (ny < 0.0) lan = TWO_PI - lan;
-        }
-        double aop = 0.0;
-        if (nMag > 1e-10 && ecc > 1e-10) {
-            double ndote = (nx*evx + ny*evy) / (nMag * ecc);
-            aop = std::acos(std::clamp(ndote, -1.0, 1.0));
-            if (evz < 0.0) aop = TWO_PI - aop;
-        }
-
-        // ---- Phase 2: coast ellipse — SAME orig as burn arc ----
-        drawEllipse(orig, camPos, sma, ecc, lan, inc, aop, { 0, 220, 120, 160 });
     }
 };
