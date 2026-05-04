@@ -5,46 +5,59 @@
 #include <string>
 #include <cmath>
 
+// Double-precision 3D vector for world-space positions in real units (meters)
+struct DVec3 {
+    double x = 0.0, y = 0.0, z = 0.0;
+
+    DVec3 operator+(const DVec3& o) const { return { x+o.x, y+o.y, z+o.z }; }
+    DVec3 operator-(const DVec3& o) const { return { x-o.x, y-o.y, z-o.z }; }
+
+    double length() const { return sqrt(x*x + y*y + z*z); }
+
+    static DVec3 zero() { return {0.0, 0.0, 0.0}; }
+
+    // Convert to raylib float Vector3, relative to an origin.
+    // Always subtract a reference point before casting to avoid float precision loss.
+    Vector3 toVec3(const DVec3& origin = zero()) const {
+        return { (float)(x - origin.x), (float)(y - origin.y), (float)(z - origin.z) };
+    }
+};
+
 class Planet {
 public:
-    // Physical properties
     std::string name;
-    double mass;
-    float radius;
-    double soiRadius;
+    double      mass;
+    double      radius;     // meters
+    double      soiRadius;  // meters
 
-    // Orbital parameters (Keplerian elements)
+    // Keplerian orbital elements (SI: meters, radians)
     double semiMajorAxis;
     double eccentricity;
     double inclination;
     double argOfPeriapsis;
     double lonAscendingNode;
     double meanAnomalyEpoch;
-    double renderScale = 1.0; // multiply computed positions by this for rendering
 
-	// Visuals
-	Color color = WHITE;
+    Color color = WHITE;
 
-    // Hierarchy
     Planet* parent;
     std::vector<Planet*> children;
 
-    // Computed each frame
-    Vector3 position;
+    // World position in meters
+    DVec3 position;
 
     static constexpr double G = 6.674e-11;
 
-    Planet(std::string name,
-           double mass,
-           float radius,
-           double semiMajorAxis,
-           double eccentricity,
-           double inclination,
-           double argOfPeriapsis,
-           double lonAscendingNode,
-           double meanAnomalyEpoch,
-           Planet* parent = nullptr,
-           double renderScale = 1.0)
+    Planet(std::string  name,
+           double       mass,
+           double       radius,
+           double       semiMajorAxis,
+           double       eccentricity,
+           double       inclination,
+           double       argOfPeriapsis,
+           double       lonAscendingNode,
+           double       meanAnomalyEpoch,
+           Planet*      parent = nullptr)
         : name(name),
           mass(mass),
           radius(radius),
@@ -54,16 +67,13 @@ public:
           argOfPeriapsis(argOfPeriapsis),
           lonAscendingNode(lonAscendingNode),
           meanAnomalyEpoch(meanAnomalyEpoch),
-          renderScale(renderScale),
-          parent(parent),
-          position({0,0,0})
+          parent(parent)
     {
         if (parent) {
             parent->children.push_back(this);
-            // SOI = a * (m / M)^(2/5), stored in render units
-            soiRadius = semiMajorAxis * renderScale * pow(mass / parent->mass, 2.0 / 5.0);
+            soiRadius = semiMajorAxis * pow(mass / parent->mass, 2.0 / 5.0);
         } else {
-            soiRadius = 1e30; // root body SOI is effectively infinite
+            soiRadius = 1e30;
         }
     }
 
@@ -74,107 +84,87 @@ public:
             child->update(t);
     }
 
-    Planet* getSOI(Vector3 worldPos) {
+    Planet* getSOI(const DVec3& worldPos) {
         for (auto* child : children) {
-            float dist = Vector3Distance(worldPos, child->position);
-            if (dist < (float)child->soiRadius)
+            DVec3 delta = { worldPos.x - child->position.x,
+                            worldPos.y - child->position.y,
+                            worldPos.z - child->position.z };
+            if (delta.length() < child->soiRadius)
                 return child->getSOI(worldPos);
         }
         return this;
     }
 
-    void draw() const {
-        DrawSphereWires(position, radius, 12, 12, color);
-        drawOrbit();
+    // camPos: world-space camera position in meters.
+    // All geometry is shifted relative to camPos before converting to float,
+    // keeping rendering near the float origin regardless of world scale.
+    void draw(const DVec3& camPos) const {
+        Vector3 relPos = position.toVec3(camPos);
+        DrawSphereWires(relPos, (float)radius, 12, 12, color);
+        drawOrbit(camPos);
         for (auto* child : children)
-            child->draw();
+            child->draw(camPos);
     }
 
 private:
-    // Solve Kepler's equation M = E - e*sin(E) for E via Newton-Raphson
     double solveKepler(double M, double e) const {
-        // Normalize M to [0, 2π]
         M = fmod(M, 2.0 * M_PI);
         if (M < 0) M += 2.0 * M_PI;
-
-        // Initial guess — works well for low/moderate eccentricity
         double E = (e < 0.8) ? M : M_PI;
-
         for (int i = 0; i < 100; i++) {
             double dE = (M - E + e * sin(E)) / (1.0 - e * cos(E));
             E += dE;
             if (fabs(dE) < 1e-10) break;
         }
-
         return E;
     }
 
-    Vector3 computePosition(double t) const {
-        // 1. Mean motion (radians per second)
-        double n = sqrt(G * parent->mass / pow(semiMajorAxis, 3.0));
+    DVec3 computePosition(double t) const {
+        double n  = sqrt(G * parent->mass / pow(semiMajorAxis, 3.0));
+        double M  = meanAnomalyEpoch + n * t;
+        double E  = solveKepler(M, eccentricity);
 
-        // 2. Mean anomaly at time t
-        double M = meanAnomalyEpoch + n * t;
-
-        // 3. Eccentric anomaly via Newton-Raphson
-        double E = solveKepler(M, eccentricity);
-
-        // 4. True anomaly
         double nu = 2.0 * atan2(
             sqrt(1.0 + eccentricity) * sin(E / 2.0),
             sqrt(1.0 - eccentricity) * cos(E / 2.0)
         );
 
-        // 5. Distance from parent
-        double r = semiMajorAxis * (1.0 - eccentricity * cos(E));
-
-        // 6. Position in orbital plane (perifocal frame)
+        double r     = semiMajorAxis * (1.0 - eccentricity * cos(E));
         double x_orb = r * cos(nu);
         double y_orb = r * sin(nu);
 
-        // 7. Rotate into 3D world space using orbital elements
-        //    Rz(-Ω) * Rx(-i) * Rz(-ω)
         double cosO = cos(lonAscendingNode), sinO = sin(lonAscendingNode);
         double cosi = cos(inclination),      sini = sin(inclination);
         double cosw = cos(argOfPeriapsis),   sinw = sin(argOfPeriapsis);
 
-        // Standard perifocal -> ecliptic (XZ) frame
-		// X = right, Y = up (north), Z = toward viewer
-		double x = (cosO * cosw - sinO * sinw * cosi) * x_orb
-				 + (-cosO * sinw - sinO * cosw * cosi) * y_orb;
+        double x = (cosO * cosw - sinO * sinw * cosi) * x_orb
+                 + (-cosO * sinw - sinO * cosw * cosi) * y_orb;
+        double y = (sinO * cosw + cosO * sinw * cosi) * x_orb
+                 + (-sinO * sinw + cosO * cosw * cosi) * y_orb;
+        double z = (sinw * sini) * x_orb
+                 + (cosw * sini) * y_orb;
 
-		double y = (sinO * cosw + cosO * sinw * cosi) * x_orb
-				 + (-sinO * sinw + cosO * cosw * cosi) * y_orb;
-
-		double z = (sinw * sini) * x_orb
-				 + (cosw * sini) * y_orb;
-
-        // 8. Offset by parent world position
         return {
-            parent->position.x + (float)(x * renderScale),
-            parent->position.y + (float)(y * renderScale),
-            parent->position.z + (float)(z * renderScale)
+            parent->position.x + x,
+            parent->position.y + y,
+            parent->position.z + z
         };
     }
 
-    // Draw the orbit path as a series of line segments
-    void drawOrbit() const {
+    void drawOrbit(const DVec3& camPos) const {
         if (!parent) return;
 
-        const int segments = 4096;
-        Vector3 prev = {0,0,0};
+        const int segments = 512;
+        Vector3 prev = {};
 
         for (int i = 0; i <= segments; i++) {
-            // Step through one full orbit by sweeping mean anomaly
-            double M = (2.0 * M_PI / segments) * i;
-            double E = solveKepler(M, eccentricity);
-
-            double nu = 2.0 * atan2(
+            double M     = (2.0 * M_PI / segments) * i;
+            double E     = solveKepler(M, eccentricity);
+            double nu    = 2.0 * atan2(
                 sqrt(1.0 + eccentricity) * sin(E / 2.0),
                 sqrt(1.0 - eccentricity) * cos(E / 2.0)
             );
-
-            double r = semiMajorAxis * (1.0 - eccentricity * cos(E));
+            double r     = semiMajorAxis * (1.0 - eccentricity * cos(E));
             double x_orb = r * cos(nu);
             double y_orb = r * sin(nu);
 
@@ -189,12 +179,13 @@ private:
             double z = (sinw * sini) * x_orb
                      + (cosw * sini) * y_orb;
 
-            Vector3 pt = {
-                parent->position.x + (float)(x * renderScale),
-                parent->position.y + (float)(y * renderScale),
-                parent->position.z + (float)(z * renderScale),
+            DVec3 worldPt = {
+                parent->position.x + x,
+                parent->position.y + y,
+                parent->position.z + z
             };
 
+            Vector3 pt = worldPt.toVec3(camPos);
             if (i > 0) DrawLine3D(prev, pt, DARKGRAY);
             prev = pt;
         }
