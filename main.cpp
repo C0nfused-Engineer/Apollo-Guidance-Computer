@@ -8,34 +8,22 @@
 #include <cmath>
 #include <algorithm>
 
-// ---------------------------------------------------------------------------
-// Thrust direction helpers — all return unit vectors in parent-inertial frame
-// ---------------------------------------------------------------------------
-
 static void normalize3(double& x, double& y, double& z) {
     double len = std::sqrt(x*x + y*y + z*z);
     if (len > 1e-12) { x /= len; y /= len; z /= len; }
 }
 
-// Prograde: velocity direction
 static void progradeDir(const DynamicBody& db, double& ox, double& oy, double& oz) {
     ox = db.vx; oy = db.vy; oz = db.vz;
     normalize3(ox, oy, oz);
 }
-
-// Retrograde
 static void retrogradeDir(const DynamicBody& db, double& ox, double& oy, double& oz) {
-    progradeDir(db, ox, oy, oz);
-    ox = -ox; oy = -oy; oz = -oz;
+    progradeDir(db, ox, oy, oz); ox=-ox; oy=-oy; oz=-oz;
 }
-
-// Radial outward: position direction
 static void radialOutDir(const DynamicBody& db, double& ox, double& oy, double& oz) {
     ox = db.rx; oy = db.ry; oz = db.rz;
     normalize3(ox, oy, oz);
 }
-
-// Normal to orbital plane: h = r × v
 static void normalDir(const DynamicBody& db, double& ox, double& oy, double& oz) {
     ox = db.ry*db.vz - db.rz*db.vy;
     oy = db.rz*db.vx - db.rx*db.vz;
@@ -44,11 +32,9 @@ static void normalDir(const DynamicBody& db, double& ox, double& oy, double& oz)
 }
 
 int main(int argc, char* argv[]) {
-    // --- Fullscreen at native resolution ---
     InitWindow(1920, 1080, "Orbital Sim");
     SetTargetFPS(60);
 
-    // --- Load system ---
     const char* configPath = (argc > 1) ? argv[1] : "solar_system.cfg";
     SystemLoader loader;
     try {
@@ -70,25 +56,24 @@ int main(int argc, char* argv[]) {
     std::vector<Planet*>& allBodies = loader.allBodies;
     loader.release();
 
-    // --- Spawn ship in circular orbit around Earth at 400 km altitude ---
     Planet* earth = nullptr;
     for (auto* p : allBodies)
         if (p->name == "Earth") { earth = p; break; }
     if (!earth) earth = root;
 
     DynamicBody ship;
-    ship.name        = "Ship";
-    ship.mass        = 10000.0;   // kg
-    ship.thrustAccel = 10.0;      // m/s² (~1g, fun but not unrealistic for a rocket)
-    ship.color       = GREEN;
+    ship.name         = "Ship";
+    ship.mass         = 10000.0;
+    ship.thrustAccel  = 10.0;
+    ship.color        = GREEN;
+    ship.previewSteps = 500;   // steps projected forward during burn
+    ship.previewDt    = 60.0;  // 60 sim-seconds per step → 500 min lookahead
     ship.initCircularOrbit(earth, 0.0, 400e3, 0.0);
 
-    // --- Camera ---
     float  camYaw   = 0.0f;
     float  camPitch = 80.0f;
     double camDist  = 1.5e11;
 
-    // Targets: 0..N-1 = planets, N = ship
     int camTargetIndex = 0;
     int totalTargets   = (int)allBodies.size() + 1;
 
@@ -97,15 +82,12 @@ int main(int argc, char* argv[]) {
     camera.projection = CAMERA_PERSPECTIVE;
     camera.up         = { 0.0f, 0.0f, 1.0f };
 
-    // --- Thrust mode ---
-    // 0=prograde  1=retrograde  2=radial-out  3=radial-in  4=normal  5=antinormal
     const int   NUM_MODES   = 6;
     const char* modeNames[] = {
         "Prograde", "Retrograde", "Radial Out", "Radial In", "Normal", "Anti-Normal"
     };
     int thrustMode = 0;
 
-    // --- Time ---
     double simTime   = 0.0;
     double timeScale = 1.0;
     bool   paused    = false;
@@ -113,21 +95,18 @@ int main(int argc, char* argv[]) {
     while (!WindowShouldClose()) {
         double dt = GetFrameTime();
 
-        // --- Input ---
         if (IsKeyPressed(KEY_UP))    timeScale *= 10.0;
         if (IsKeyPressed(KEY_DOWN))  timeScale /= 10.0;
         if (IsKeyPressed(KEY_SPACE)) paused = !paused;
         if (IsKeyPressed(KEY_TAB))   camTargetIndex = (camTargetIndex + 1) % totalTargets;
         if (IsKeyPressed(KEY_M))     thrustMode = (thrustMode + 1) % NUM_MODES;
 
-        // Clamp time scale during burns so RK4 sub-steps stay manageable
         double effectiveTScale = paused ? 0.0 : timeScale;
         if (ship.thrusting && effectiveTScale > 1000.0) effectiveTScale = 1000.0;
 
-        // --- Thrust ---
-        bool wantThrust = IsKeyDown(KEY_Z);
+        bool wantThrust   = IsKeyDown(KEY_Z);
         bool wasThrusting = ship.thrusting;
-        ship.thrusting = wantThrust;
+        ship.thrusting    = wantThrust;
 
         if (wantThrust) {
             double tdx = 0, tdy = 0, tdz = 0;
@@ -142,11 +121,9 @@ int main(int argc, char* argv[]) {
             ship.tdx = tdx; ship.tdy = tdy; ship.tdz = tdz;
         }
 
-        // On burn-end: refit osculating elements
         if (wasThrusting && !ship.thrusting)
             ship.onThrustStop(simTime);
 
-        // --- Simulate ---
         if (!paused) {
             double simDt = dt * effectiveTScale;
             simTime += simDt;
@@ -154,14 +131,12 @@ int main(int argc, char* argv[]) {
             ship.update(simTime, simDt);
         }
 
-        // --- Camera target position ---
         DVec3 targetPos;
         if (camTargetIndex < (int)allBodies.size())
             targetPos = allBodies[camTargetIndex]->position;
         else
             targetPos = ship.worldPos;
 
-        // Camera orbit
         if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
             Vector2 delta = GetMouseDelta();
             camYaw   += delta.x * 0.3f;
@@ -185,7 +160,6 @@ int main(int argc, char* argv[]) {
         camera.up       = { 0.0f, 0.0f, 1.0f };
         rlSetClipPlanes(camDist * 0.0001, camDist * 1000.0);
 
-        // --- Draw ---
         BeginDrawing();
         ClearBackground(BLACK);
 
@@ -193,7 +167,6 @@ int main(int argc, char* argv[]) {
             root->draw(camWorldPos);
             ship.draw(camWorldPos);
 
-            // Ecliptic reference grid (XY plane, Z=0)
             const double AU       = 1.496e11;
             const double gridExt  = 6.0 * AU;
             const double gridStep = 0.1 * AU;
@@ -206,12 +179,10 @@ int main(int argc, char* argv[]) {
             }
         EndMode3D();
 
-        // --- HUD ---
-        int sw = GetScreenWidth();
+        // HUD
         int sh = GetScreenHeight();
-        (void)sw;
 
-        DrawText("UP/DOWN: timescale  |  TAB: next target  |  M: thrust mode  |  Z: fire  |  SPACE: pause  |  RMB: rotate  |  Scroll: zoom",
+        DrawText("UP/DOWN: timescale  |  TAB: target  |  M: thrust mode  |  Z: fire  |  SPACE: pause  |  RMB: rotate  |  Scroll: zoom",
                  10, 10, 16, RAYWHITE);
 
         char buf[256];
@@ -221,31 +192,31 @@ int main(int argc, char* argv[]) {
         sprintf(buf, "Target: %s", targetName);
         DrawText(buf, 10, 30, 18, YELLOW);
 
-        if (timeScale >= 86400.0)      sprintf(buf, "Time scale: %.1f days/s", timeScale / 86400.0);
-        else if (timeScale >= 3600.0)  sprintf(buf, "Time scale: %.1f hrs/s",  timeScale / 3600.0);
-        else if (timeScale >= 60.0)    sprintf(buf, "Time scale: %.1f min/s",  timeScale / 60.0);
+        if      (timeScale >= 86400.0) sprintf(buf, "Time scale: %.1f days/s", timeScale/86400.0);
+        else if (timeScale >= 3600.0)  sprintf(buf, "Time scale: %.1f hrs/s",  timeScale/3600.0);
+        else if (timeScale >= 60.0)    sprintf(buf, "Time scale: %.1f min/s",  timeScale/60.0);
         else                           sprintf(buf, "Time scale: %.0fx",        timeScale);
         DrawText(buf, 10, 50, 18, RAYWHITE);
 
         long long totalSec = (long long)simTime;
         sprintf(buf, "Sim time: %lld d %02lld h %02lld m %02lld s",
-            (long long)(totalSec / 86400),
-            (long long)((totalSec % 86400) / 3600),
-            (long long)((totalSec % 3600)  / 60),
-            (long long)(totalSec % 60));
+            (long long)(totalSec/86400),
+            (long long)((totalSec%86400)/3600),
+            (long long)((totalSec%3600)/60),
+            (long long)(totalSec%60));
         DrawText(buf, 10, 70, 18, RAYWHITE);
 
-        if (camDist >= 1.496e11)  sprintf(buf, "Cam dist: %.3f AU",  camDist / 1.496e11);
-        else if (camDist >= 1e6)  sprintf(buf, "Cam dist: %.0f km",  camDist / 1e3);
-        else if (camDist >= 1e3)  sprintf(buf, "Cam dist: %.1f km",  camDist / 1e3);
-        else                      sprintf(buf, "Cam dist: %.1f m",   camDist);
+        if      (camDist >= 1.496e11) sprintf(buf, "Cam dist: %.3f AU",  camDist/1.496e11);
+        else if (camDist >= 1e6)      sprintf(buf, "Cam dist: %.0f km",  camDist/1e3);
+        else if (camDist >= 1e3)      sprintf(buf, "Cam dist: %.1f km",  camDist/1e3);
+        else                          sprintf(buf, "Cam dist: %.1f m",   camDist);
         DrawText(buf, 10, 90, 18, RAYWHITE);
 
         if (paused) DrawText("[ PAUSED ]", 10, 115, 20, RED);
 
-        // --- Ship status panel (bottom-left) ---
-        int py = sh - 130;
-        DrawRectangle(0, py - 6, 380, 136, { 0, 0, 0, 180 });
+        // Ship panel
+        int py = sh - 155;
+        DrawRectangle(0, py - 6, 420, 161, { 0, 0, 0, 180 });
 
         DrawText("-- SHIP --", 10, py, 18, GREEN); py += 22;
 
@@ -256,19 +227,35 @@ int main(int argc, char* argv[]) {
         DrawText(buf, 10, py, 16, ship.thrusting ? ORANGE : GRAY); py += 20;
 
         double alt = ship.altitude();
-        if (alt > 1e6)       sprintf(buf, "Alt:   %.0f km",   alt / 1e3);
-        else if (alt > 0)    sprintf(buf, "Alt:   %.1f m",    alt);
-        else                 sprintf(buf, "Alt:   SUBORBITAL");
+        if      (alt > 1e6) sprintf(buf, "Alt:   %.0f km",  alt/1e3);
+        else if (alt > 0)   sprintf(buf, "Alt:   %.1f m",   alt);
+        else                sprintf(buf, "Alt:   IMPACT");
         DrawText(buf, 10, py, 16, alt > 0 ? RAYWHITE : RED); py += 20;
 
-        sprintf(buf, "Speed: %.1f m/s  (%.3f km/s)", ship.speed(), ship.speed() / 1e3);
+        sprintf(buf, "Speed: %.1f m/s  (%.3f km/s)", ship.speed(), ship.speed()/1e3);
         DrawText(buf, 10, py, 16, RAYWHITE); py += 20;
 
-        if (ship.elements.valid)
-            sprintf(buf, "SMA: %.0f km   Ecc: %.5f", ship.elements.sma / 1e3, ship.elements.ecc);
-        else
-            sprintf(buf, "SMA: ---   Ecc: ---");
-        DrawText(buf, 10, py, 16, RAYWHITE);
+        if (ship.elements.valid) {
+            double sma = ship.elements.sma;
+            double ecc = ship.elements.ecc;
+            double pe  = (sma * (1.0 - ecc) - ship.parent->radius) / 1e3;
+            double ap  = (sma * (1.0 + ecc) - ship.parent->radius) / 1e3;
+            sprintf(buf, "Pe: %.0f km   Ap: %.0f km", pe, ap);
+            DrawText(buf, 10, py, 16, RAYWHITE); py += 20;
+
+            sprintf(buf, "SMA: %.0f km   Ecc: %.5f", sma/1e3, ecc);
+            DrawText(buf, 10, py, 16, RAYWHITE);
+        } else {
+            DrawText("SMA: ---   Ecc: ---", 10, py, 16, RAYWHITE);
+        }
+
+        // Legend for trajectory colours during burn
+        if (ship.thrusting) {
+            DrawRectangle(10, py - 44, 14, 14, ORANGE);
+            DrawText("burn arc", 28, py - 44, 15, RAYWHITE);
+            DrawRectangle(10, py - 26, 14, 14, { 0, 220, 120, 200 });
+            DrawText("projected coast orbit", 28, py - 26, 15, RAYWHITE);
+        }
 
         EndDrawing();
     }
